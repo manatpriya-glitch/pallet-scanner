@@ -1,0 +1,228 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ระบบควบคุมพาเลท - สแกน QR</title>
+<style>
+  body { font-family: 'Segoe UI', sans-serif; background:#f4f6f8; margin:0; padding:16px; }
+  h2 { color:#1f3a5f; margin-bottom:4px; }
+  .card { background:#fff; border-radius:12px; padding:16px; margin-bottom:14px; box-shadow:0 1px 4px rgba(0,0,0,0.1); }
+  select, input, textarea, button { width:100%; padding:10px; margin-top:6px; border-radius:8px; border:1px solid #ccc; font-size:15px; box-sizing:border-box; }
+  button.primary { background:#1f6feb; color:#fff; border:none; font-weight:bold; margin-top:14px; }
+  button.secondary { background:#eee; border:none; margin-top:8px; }
+  #reader { width:100%; border-radius:10px; overflow:hidden; }
+  .pallet-chip { display:inline-block; background:#e3f2fd; color:#0d47a1; padding:6px 10px; border-radius:16px; margin:4px 4px 0 0; font-size:13px; }
+  .result-ok { color:green; }
+  .result-fail { color:#c62828; }
+  label { font-size:13px; color:#555; font-weight:600; }
+  #loginOverlay { position:fixed; inset:0; background:#f4f6f8; display:flex; align-items:center; justify-content:center; padding:16px; z-index:100; }
+</style>
+</head>
+<body>
+
+<!-- ต้องกรอก Token คลัง + เลือกชื่อ ก่อนใช้งาน (แทนการล็อกอิน Google) -->
+<div id="loginOverlay">
+  <div class="card" style="max-width:360px; width:100%;">
+    <h2>🔐 เข้าสู่ระบบสแกนพาเลท</h2>
+    <label>รหัสผ่านคลัง (Token)</label>
+    <input type="password" id="tokenInput" placeholder="รับรหัสจากหัวหน้าคลัง">
+    <label>ชื่อผู้บันทึก</label>
+    <select id="staffSelect"><option value="">-- กำลังโหลดรายชื่อ --</option></select>
+    <button class="primary" onclick="login()">เข้าสู่ระบบ</button>
+    <div id="loginError" class="result-fail" style="margin-top:8px;"></div>
+  </div>
+</div>
+
+<div id="mainApp" style="display:none;">
+  <h2>📦 สแกนพาเลท</h2>
+  <div id="who" style="color:#666; font-size:13px;"></div>
+
+  <div class="card">
+    <label>ประเภทธุรกรรม</label>
+    <select id="txnType">
+      <option value="OUT">ส่งออกพร้อมสินค้า (OUT)</option>
+      <option value="IN">รับคืนเข้าคลัง (IN)</option>
+      <option value="DAMAGE">แจ้งชำรุด (DAMAGE)</option>
+      <option value="REPAIR_DONE">ซ่อมเสร็จ กลับมาพร้อมใช้</option>
+      <option value="LOST">แจ้งสูญหาย</option>
+    </select>
+
+    <label>เลขที่เอกสารอ้างอิง (Invoice / PO)</label>
+    <input type="text" id="docRef" placeholder="เช่น INV-00231">
+
+    <label>ปลายทาง / ลูกค้า / คลังที่รับคืน</label>
+    <input type="text" id="locationTo" placeholder="เช่น บริษัท ABC จำกัด">
+
+    <label>หมายเหตุ</label>
+    <textarea id="notes" rows="2" placeholder="ระบุเพิ่มเติม (ถ้ามี)"></textarea>
+
+    <label>ลิงก์รูปถ่าย (บังคับถ้าเลือก DAMAGE)</label>
+    <input type="text" id="photoUrl" placeholder="วางลิงก์รูปที่อัปโหลดไว้">
+  </div>
+
+  <div class="card">
+    <label>สแกน QR Code บนพาเลท</label>
+    <div id="reader"></div>
+    <div id="cameraStatus" style="font-size:13px; margin-top:6px;"></div>
+    <button class="secondary" onclick="toggleScanner()">เปิด/ปิดกล้อง</button>
+
+    <div style="margin-top:10px; font-size:13px;">
+      หรือกรอกรหัสพาเลทด้วยมือ / เครื่องสแกนภายนอก:
+      <input type="text" id="manualId" placeholder="เช่น PLT-A-0001" onkeydown="if(event.key==='Enter'){addManualId();event.preventDefault();}">
+      <button class="secondary" onclick="addManualId()">➕ เพิ่มรหัสนี้</button>
+    </div>
+    <div id="chips" style="margin-top:10px;"></div>
+  </div>
+
+  <button class="primary" onclick="submitTransaction()">✅ บันทึกธุรกรรม</button>
+  <div id="output" class="card" style="display:none;"></div>
+</div>
+
+<script src="https://unpkg.com/html5-qrcode@2.3.8/html5-qrcode.min.js"></script>
+<script>
+  // ★★★ แก้ URL นี้เป็นลิงก์ Web App ของ Apps Script ที่ deploy ไว้ (.../exec) ★★★
+  const WEBAPP_URL = 'https://script.google.com/macros/s/XXXXXXXXXXXXXXXX/exec';
+
+  let scanner = null, scannerOn = false;
+  const scannedIds = new Set();
+  let currentToken = '', currentStaffName = '';
+
+  // โหลดรายชื่อพนักงานตอนเปิดหน้า
+  fetch(WEBAPP_URL + '?action=stafflist')
+    .then(r => r.json())
+    .then(names => {
+      const sel = document.getElementById('staffSelect');
+      sel.innerHTML = '<option value="">-- เลือกชื่อ --</option>' +
+        names.map(n => '<option value="' + n + '">' + n + '</option>').join('');
+    })
+    .catch(() => {
+      document.getElementById('staffSelect').innerHTML = '<option value="">โหลดรายชื่อไม่สำเร็จ ตรวจ WEBAPP_URL</option>';
+    });
+
+  function login() {
+    const token = document.getElementById('tokenInput').value.trim();
+    const staffName = document.getElementById('staffSelect').value;
+    if (!token || !staffName) {
+      document.getElementById('loginError').innerText = 'กรุณากรอก Token และเลือกชื่อผู้บันทึก';
+      return;
+    }
+    currentToken = token;
+    currentStaffName = staffName;
+    document.getElementById('loginOverlay').style.display = 'none';
+    document.getElementById('mainApp').style.display = 'block';
+    document.getElementById('who').innerText = '👤 ผู้บันทึก: ' + staffName;
+  }
+
+  function toggleScanner() {
+    const statusEl = document.getElementById('cameraStatus');
+    if (!scannerOn) {
+      statusEl.style.color = '#555';
+      statusEl.innerText = 'กำลังขอสิทธิ์กล้อง...';
+
+      if (!window.isSecureContext) {
+        statusEl.style.color = '#c62828';
+        statusEl.innerText = 'หน้านี้ไม่ได้เปิดผ่าน HTTPS กล้องจะใช้งานไม่ได้';
+        return;
+      }
+      if (typeof Html5Qrcode === 'undefined') {
+        statusEl.style.color = '#c62828';
+        statusEl.innerText = 'โหลดไลบรารีสแกน QR ไม่สำเร็จ';
+        return;
+      }
+
+      scanner = new Html5Qrcode('reader');
+      scanner.start(
+        { facingMode: 'environment' },
+        { fps: 10, qrbox: 220 },
+        onScanSuccess
+      ).then(() => {
+        scannerOn = true;
+        statusEl.style.color = 'green';
+        statusEl.innerText = 'กล้องเปิดแล้ว เล็งไปที่ QR บนพาเลท';
+      }).catch((err) => {
+        scannerOn = false;
+        statusEl.style.color = '#c62828';
+        statusEl.innerText = 'เปิดกล้องไม่สำเร็จ: ' + (err && err.message ? err.message : err) +
+          ' — ใช้ช่องกรอกรหัสด้วยมือด้านล่างแทนได้';
+      });
+    } else {
+      scanner.stop().then(() => { scanner.clear(); scannerOn = false; statusEl.innerText = ''; });
+    }
+  }
+
+  function onScanSuccess(decodedText) {
+    if (!scannedIds.has(decodedText)) {
+      scannedIds.add(decodedText);
+      renderChips();
+      if (navigator.vibrate) navigator.vibrate(80);
+    }
+  }
+
+  function addManualId() {
+    const input = document.getElementById('manualId');
+    const val = input.value.trim();
+    if (!val) return;
+    if (!scannedIds.has(val)) { scannedIds.add(val); renderChips(); }
+    input.value = '';
+    input.focus();
+  }
+
+  function renderChips() {
+    const chips = document.getElementById('chips');
+    chips.innerHTML = '';
+    scannedIds.forEach(id => {
+      const span = document.createElement('span');
+      span.className = 'pallet-chip';
+      span.innerText = id + ' ✕';
+      span.onclick = () => { scannedIds.delete(id); renderChips(); };
+      chips.appendChild(span);
+    });
+  }
+
+  function submitTransaction() {
+    if (scannedIds.size === 0) { alert('กรุณาสแกนพาเลทอย่างน้อย 1 ตัว'); return; }
+
+    const body = {
+      token: currentToken,
+      staffName: currentStaffName,
+      payload: {
+        palletIds: Array.from(scannedIds),
+        type: document.getElementById('txnType').value,
+        docRef: document.getElementById('docRef').value,
+        locationTo: document.getElementById('locationTo').value,
+        notes: document.getElementById('notes').value,
+        photoUrl: document.getElementById('photoUrl').value
+      }
+    };
+
+    const btn = document.querySelector('button.primary');
+    btn.disabled = true;
+
+    // สำคัญ: ส่ง body เป็น string เฉยๆ ไม่ตั้ง header Content-Type เอง
+    // เพื่อเลี่ยง CORS preflight ที่ Apps Script ตอบรับไม่ได้
+    fetch(WEBAPP_URL, { method: 'POST', body: JSON.stringify(body) })
+      .then(r => r.json())
+      .then(res => {
+        btn.disabled = false;
+        const out = document.getElementById('output');
+        out.style.display = 'block';
+        if (!res.ok) {
+          out.innerHTML = '<span class="result-fail">เกิดข้อผิดพลาด: ' + res.error + '</span>';
+          return;
+        }
+        out.innerHTML = '<b>ผลการบันทึก (' + res.data.staff + ')</b><br>' +
+          res.data.results.map(r =>
+            '<div class="' + (r.ok ? 'result-ok' : 'result-fail') + '">' + r.palletId + ': ' + r.msg + '</div>'
+          ).join('');
+        scannedIds.clear();
+        renderChips();
+      })
+      .catch(err => {
+        btn.disabled = false;
+        alert('เชื่อมต่อไม่สำเร็จ: ' + err);
+      });
+  }
+</script>
+</body>
+</html>
