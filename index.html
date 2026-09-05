@@ -49,10 +49,16 @@
     </select>
 
     <label>เลขที่เอกสารอ้างอิง (Invoice / PO)</label>
-    <input type="text" id="docRef" placeholder="เช่น INV-00231">
+    <select id="docRef" onchange="toggleOther('docRef')">
+      <option value="">-- กำลังโหลดรายการ --</option>
+    </select>
+    <input type="text" id="docRefOther" placeholder="พิมพ์เลขที่เอกสารเอง" style="display:none;">
 
     <label>ปลายทาง / ลูกค้า / คลังที่รับคืน</label>
-    <input type="text" id="locationTo" placeholder="เช่น บริษัท ABC จำกัด">
+    <select id="locationTo" onchange="toggleOther('locationTo')">
+      <option value="">-- กำลังโหลดรายการ --</option>
+    </select>
+    <input type="text" id="locationToOther" placeholder="พิมพ์ชื่อลูกค้า/ปลายทางเอง" style="display:none;">
 
     <label>หมายเหตุ</label>
     <textarea id="notes" rows="2" placeholder="ระบุเพิ่มเติม (ถ้ามี)"></textarea>
@@ -82,7 +88,7 @@
 <script src="https://unpkg.com/html5-qrcode@2.3.8/html5-qrcode.min.js"></script>
 <script>
   // ★★★ แก้ URL นี้เป็นลิงก์ Web App ของ Apps Script ที่ deploy ไว้ (.../exec) ★★★
-  const WEBAPP_URL = 'https://script.google.com/macros/s/XXXXXXXXXXXXXXXX/exec';
+  const WEBAPP_URL = 'https://script.google.com/macros/s/AKfycbwLEaJnfaTSdzWfnOjVq6YOdhiV7LzhiErGTV9J8xjOb3lRw11_K2V9TqenFi1eXQ3SRQ/exec';
 
   let scanner = null, scannerOn = false;
   const scannedIds = new Set();
@@ -99,6 +105,36 @@
     .catch(() => {
       document.getElementById('staffSelect').innerHTML = '<option value="">โหลดรายชื่อไม่สำเร็จ ตรวจ WEBAPP_URL</option>';
     });
+
+  // โหลดรายการ Invoice ที่เปิดอยู่ + รายชื่อลูกค้า สำหรับ dropdown
+  fetch(WEBAPP_URL + '?action=invoicelist')
+    .then(r => r.json())
+    .then(list => fillSelect('docRef', list, 'เลือกเลขที่ Invoice'))
+    .catch(() => fillSelect('docRef', [], 'โหลดรายการไม่สำเร็จ'));
+
+  fetch(WEBAPP_URL + '?action=customerlist')
+    .then(r => r.json())
+    .then(list => fillSelect('locationTo', list, 'เลือกลูกค้า/ปลายทาง'))
+    .catch(() => fillSelect('locationTo', [], 'โหลดรายการไม่สำเร็จ'));
+
+  function fillSelect(id, list, placeholder) {
+    const sel = document.getElementById(id);
+    sel.innerHTML = '<option value="">-- ' + placeholder + ' --</option>' +
+      list.map(v => '<option value="' + v + '">' + v + '</option>').join('') +
+      '<option value="__OTHER__">+ อื่นๆ (พิมพ์เอง)</option>';
+  }
+
+  function toggleOther(id) {
+    const sel = document.getElementById(id);
+    const other = document.getElementById(id + 'Other');
+    other.style.display = sel.value === '__OTHER__' ? 'block' : 'none';
+  }
+
+  function getFieldValue(id) {
+    const sel = document.getElementById(id);
+    if (sel.value === '__OTHER__') return document.getElementById(id + 'Other').value.trim();
+    return sel.value;
+  }
 
   function login() {
     const token = document.getElementById('tokenInput').value.trim();
@@ -189,8 +225,8 @@
       payload: {
         palletIds: Array.from(scannedIds),
         type: document.getElementById('txnType').value,
-        docRef: document.getElementById('docRef').value,
-        locationTo: document.getElementById('locationTo').value,
+        docRef: getFieldValue('docRef'),
+        locationTo: getFieldValue('locationTo'),
         notes: document.getElementById('notes').value,
         photoUrl: document.getElementById('photoUrl').value
       }
